@@ -1,0 +1,387 @@
+(async () => {
+  (function ensureVKSheet(){
+    if (window.VKSheet) return;
+
+    const log  = (...a)=>console.log('%c[VK Sheet]', 'color:#7bd;font-weight:bold', ...a);
+    const warn = (...a)=>console.warn('%c[VK Sheet]', 'color:#fb3;font-weight:bold', ...a);
+
+    const isVisible = el => {
+      if (!(el instanceof Element)) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') <= 0.01) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+
+    const cssPath = (el) => {
+      if (!el || el.nodeType !== 1) return '';
+      const parts = [];
+      for (let n=el,depth=0; n && n.nodeType===1 && depth<8; depth++, n=n.parentElement){
+        let p = n.nodeName.toLowerCase();
+        if (n.id){ p += '#'+n.id; parts.unshift(p); break; }
+        const cls = (n.className||'').toString().trim().split(/\s+/).filter(Boolean).slice(0,3);
+        if (cls.length) p += '.'+cls.join('.');
+        if (n.parentElement){
+          const sibs = [...n.parentElement.children].filter(x=>x.nodeName===n.nodeName);
+          if (sibs.length>1) p += `:nth-of-type(${sibs.indexOf(n)+1})`;
+        }
+        parts.unshift(p);
+      }
+      return parts.join(' > ');
+    };
+
+    const SHEET_CAND =
+      '[data-testid="dropdownactionsheet"], .vkuiActionSheet, .vkuiActionSheetDropdown, ' +
+      '.vkuiPopover__host, [role="dialog"], [role="menu"], [role="listbox"]';
+
+    function getLiveSheet(){
+      const cand = [...document.querySelectorAll(SHEET_CAND)].filter(isVisible);
+      if (!cand.length) return null;
+      const withZI = cand.map(el => [el, parseInt(getComputedStyle(el).zIndex || '0', 10), el]);
+      withZI.sort((a,b)=> (b[1]-a[1]) || (b[2].compareDocumentPosition(a[2]) & Node.DOCUMENT_POSITION_FOLLOWING ? 1 : -1));
+      const root = withZI[0][0];
+      const inner = root.querySelector('[data-testid="dropdownactionsheet"], .vkuiActionSheet, .vkuiActionSheetDropdown') || root;
+      return inner;
+    }
+
+    const ITEM_SEL =
+      '.vkuiActionSheetItem, .vkuiActionSheetItem__children, .vkitDropdownActionSheet__item, ' +
+      '[role="menuitem"], .vkuiTappable__host, button, a, [tabindex]';
+
+    function listSheet(){
+      const sheet = getLiveSheet();
+      if (!sheet){ warn('живой sheet не найден'); return null; }
+      let nodes = [...sheet.querySelectorAll(ITEM_SEL)].filter(isVisible);
+
+      if (!nodes.length) {
+        const walker = document.createTreeWalker(sheet, NodeFilter.SHOW_TEXT, null);
+        const found = new Set();
+        let t;
+        while ((t = walker.nextNode())) {
+          const txt = (t.textContent || '').replace(/\s+/g,' ').trim();
+          if (!txt) continue;
+          const clickable = t.parentElement?.closest(ITEM_SEL);
+          if (clickable && isVisible(clickable)) found.add(clickable);
+        }
+        nodes = [...found];
+      }
+
+      const rows = nodes.map((el,i)=>({ i, text: (el.textContent||'').replace(/\s+/g,' ').trim(), path: cssPath(el) }))
+                          .filter(r => r.text);
+      console.table(rows);
+      if (!rows.length) warn('sheet найден, но видимых пунктов не нашёл (проверь, что меню открыто).');
+      return nodes;
+    }
+
+    function clickByTextInSheet(regex){
+      const sheet = getLiveSheet();
+      if (!sheet){ warn('sheet не найден'); return false; }
+
+      const all = [...sheet.querySelectorAll(ITEM_SEL)].filter(isVisible);
+      let btn = all.find(el => regex.test((el.textContent || '').replace(/\s+/g,' ').trim()));
+
+      if (!btn){
+        const walker = document.createTreeWalker(sheet, NodeFilter.SHOW_TEXT, null);
+        let t;
+        while ((t = walker.nextNode())) {
+          const text = (t.textContent || '').replace(/\s+/g,' ').trim();
+          if (text && regex.test(text)) {
+            const clickable = t.parentElement?.closest(ITEM_SEL);
+            if (clickable && isVisible(clickable)) { btn = clickable; break; }
+          }
+        }
+      }
+
+      if (!btn){ warn('не найден пункт по тексту:', regex); return false; }
+      const r = btn.getBoundingClientRect();
+      const center = {clientX: Math.round(r.left + r.width/2), clientY: Math.round(r.top + r.height/2)};
+      ['pointerdown','mousedown','mouseup','click'].forEach(type => btn.dispatchEvent(new MouseEvent(type, {bubbles:true, ...center})));
+      log('кликнул по:', (btn.textContent||'').replace(/\s+/g,' ').trim());
+      return true;
+    }
+
+    async function confirmIfModal(){
+      for (let i=0;i<18;i++){
+        const box = document.querySelector('[data-testid="box_layout"], [role="dialog"]');
+        if (box && isVisible(box)){
+          const okBtn = [...box.querySelectorAll('.FlatButton, .vkuiButton, button, [role="button"], [tabindex]')]
+            .filter(isVisible)
+            .find(el => /отписаться|выйти|покинуть|да|подтвердить/i.test((el.textContent||'').replace(/\s+/g,' ').trim()));
+          if (okBtn){ okBtn.click(); log('подтвердил модалку:', okBtn.textContent.trim()); }
+          return true;
+        }
+        await new Promise(r=>setTimeout(r,120));
+      }
+      return false;
+    }
+
+    window.VKSheet = {
+      list: listSheet,
+      clickLeave: () =>
+        clickByTextInSheet(/^\s*отписаться\s*$/i) ||
+        clickByTextInSheet(/выйти из сообщества/i) ||
+        clickByTextInSheet(/покинуть( сообщество| страницу)?/i) ||
+        clickByTextInSheet(/отписаться от новостей/i),
+      clickByText: (txt)=> clickByTextInSheet(new RegExp(txt,'i')),
+      confirmIfModal
+    };
+
+    if (!document.getElementById('vksheet-mini')){
+      const ui = document.createElement('div');
+      ui.id = 'vksheet-mini';
+      ui.style.cssText =
+        'position:fixed;right:12px;top:12px;z-index:2147483647;background:#0b1020;color:#fff;'+
+        'border:1px solid #234;border-radius:10px;font:12px system-ui;padding:8px;'+
+        'box-shadow:0 8px 24px rgba(0,0,0,.45);display:flex;gap:6px;align-items:center';
+      ui.innerHTML = `
+        <button id="vkL" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Пункты (L)</button>
+        <button id="vkO" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Отписаться (O)</button>
+        <span style="opacity:.7;margin-left:6px">Ctrl+Alt+L / Ctrl+Alt+O</span>
+      `;
+      document.body.appendChild(ui);
+      ui.querySelector('#vkL').onclick = () => { try{ VKSheet.list(); } catch(e){ warn(e);} };
+      ui.querySelector('#vkO').onclick = async () => { try{
+        const ok = VKSheet.clickLeave(); if (ok) await VKSheet.confirmIfModal();
+      } catch(e){ warn(e);} };
+    }
+
+    const handler = async (e) => {
+      if (!((e.ctrlKey || e.metaKey) && e.altKey)) return;
+      const key = (e.key || '').toLowerCase();
+      if (key === 'l'){ try{ VKSheet.list(); }catch(err){ warn(err); } }
+      if (key === 'o'){ try{
+        const ok = VKSheet.clickLeave(); if (ok) await VKSheet.confirmIfModal();
+      }catch(err){ warn(err); } }
+    };
+    const opts = { capture:true, passive:true };
+    [window, document, document.documentElement, document.body].forEach(t => t && t.addEventListener('keydown', handler, opts));
+    log('готово: открой меню «…», Ctrl+Alt+L — пункты, Ctrl+Alt+O — отписаться.');
+  })();
+
+  const CFG = {
+    limit: Number.POSITIVE_INFINITY,
+    startIndex: 0,
+    clickDelay: 220,
+    stepDelay: 700,
+    autoscroll: true,
+    hoverBeforeClick: true,
+    perMinuteCap: 60,
+    onlyIfNameIncludes: [],
+    skipIfNameIncludes: [],
+    dryRun: false
+  };
+
+  const state = {
+    running: true,
+    processed: [],
+    startedAt: Date.now()
+  };
+
+  function saveBlobJSON(name, data){
+    const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), {href:url, download:name});
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 3000);
+  }
+
+  function humanTime(ms){
+    const s = Math.round(ms/1000);
+    const m = Math.floor(s/60);
+    return m ? `${m}м ${s%60}с` : `${s}с`;
+  }
+
+  (function ensurePanel(){
+    if (document.getElementById('vk-auto-panel')) return;
+    const box = document.createElement('div');
+    box.id = 'vk-auto-panel';
+    box.style.cssText = 'position:fixed;right:12px;top:62px;z-index:2147483647;background:#0b1020;color:#fff;border:1px solid #234;border-radius:10px;font:12px system-ui;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);display:flex;gap:6px;align-items:center';
+    box.innerHTML = `
+      <button id="vkauto-pause" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Пауза</button>
+      <button id="vkauto-export" style="background:#30363d;color:#fff;border:0;border-radius:8px;padding:6px 8px;cursor:pointer">Export JSON</button>
+      <span id="vkauto-info" style="opacity:.75"></span>
+    `;
+    document.body.appendChild(box);
+    const btnP = box.querySelector('#vkauto-pause');
+    const btnE = box.querySelector('#vkauto-export');
+    const info = box.querySelector('#vkauto-info');
+    const sync = ()=> info.textContent = `Состояние: ${state.running?'RUNNING':'PAUSED'}   Events: ${state.processed.length}   Время: ${humanTime(Date.now()-state.startedAt)}`;
+    sync();
+    setInterval(sync, 1000);
+    btnP.onclick = ()=>{ state.running=!state.running; btnP.textContent = state.running?'Пауза':'Продолжить'; sync(); };
+    btnE.onclick = ()=> saveBlobJSON(`vk_unsub_${Date.now()}.json`, state);
+    window.VKAutoPanel = {sync};
+  })();
+
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+  const logA  = (...a)=>console.log('%c[VK Auto]', 'color:#7bd;font-weight:bold', ...a);
+  const warnA = (...a)=>console.warn('%c[VK Auto]', 'color:#fb3;font-weight:bold', ...a);
+
+  const isVisible = el => {
+    if (!(el instanceof Element)) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity||'1') <= 0.01) return false;
+    const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0;
+  };
+
+  function getListRoot() {
+    return document.querySelector('[data-testid="list"]') || document;
+  }
+  function getCards(root=getListRoot()) {
+    return [...root.querySelectorAll('.vkuiRichCell__host')];
+  }
+
+  async function ensureCards(minCount, maxRounds=40) {
+    if (!CFG.autoscroll) return;
+    const root = getListRoot();
+    let prev = -1, same = 0;
+    for (let i=0; i<maxRounds && getCards(root).length < minCount; i++) {
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(400);
+      const now = getCards(root).length;
+      if (now === prev) { same++; if (same>=3) break; } else { same=0; prev=now; }
+    }
+    window.scrollTo(0,0);
+  }
+
+  function dispatchHover(el){
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const xy = {clientX: Math.round(r.left+r.width/2), clientY: Math.round(r.top+r.height/2)};
+    ['pointerenter','mouseenter','pointerover','mouseover','mousemove'].forEach(type=>{
+      el.dispatchEvent(new MouseEvent(type,{bubbles:true, ...xy}));
+    });
+  }
+  function clickSequence(el){
+    const r = el.getBoundingClientRect();
+    const xy = {clientX: Math.round(r.left+r.width/2), clientY: Math.round(r.top+r.height/2)};
+    ['pointerdown','mousedown','mouseup','click'].forEach(type=>{
+      el.dispatchEvent(new MouseEvent(type,{bubbles:true, ...xy}));
+    });
+  }
+
+  const SHEET_SEL = '[data-testid="dropdownactionsheet"], .vkuiActionSheet, .vkuiActionSheetDropdown';
+  const hasSheet = () => !![...document.querySelectorAll(SHEET_SEL)].find(isVisible);
+
+  function cardTitle(card){
+    return (
+      card.querySelector('.vkuiHeadline__level1, .vkuiHeadline__sizeYCompact')?.textContent ||
+      card.querySelector('a[href*="/club"], a[href*="/public"], a[href*="/groups"]')?.textContent ||
+      ''
+    ).replace(/\s+/g,' ').trim();
+  }
+  function findCardByName(name){
+    if (!name) return null;
+    return getCards().find(c => (c.textContent||'').includes(name));
+  }
+  function isAlreadyUnsubIn(card){
+    const btn = [...card.querySelectorAll('button, [role="button"]')]
+      .find(b => /подписаться/i.test((b.textContent||'').trim()));
+    return !!(btn && isVisible(btn));
+  }
+
+  async function openMenu(card) {
+    card.scrollIntoView({block:'center', behavior:'instant'});
+    await sleep(80);
+    dispatchHover(card); await sleep(80);
+    const btn = card.querySelector('button[data-testid="desktop_group_item_button"]');
+    if (!btn) return false;
+    dispatchHover(btn); await sleep(60);
+    if (getComputedStyle(btn).pointerEvents === 'none') { dispatchHover(card); await sleep(80); }
+    clickSequence(btn);
+    await sleep(CFG.clickDelay);
+    if (!hasSheet()){
+      btn.focus();
+      ['keydown','keyup'].forEach(t => btn.dispatchEvent(new KeyboardEvent(t,{bubbles:true,key:'Enter',code:'Enter'})));
+      await sleep(CFG.clickDelay);
+    }
+    for (let t=0; t<12 && !hasSheet(); t++) await sleep(100);
+    return hasSheet();
+  }
+
+  function allowedByName(name){
+    if (!name) return true;
+    const low = name.toLowerCase();
+    if (CFG.skipIfNameIncludes.some(s => low.includes(s.toLowerCase()))) return false;
+    if (CFG.onlyIfNameIncludes.length && !CFG.onlyIfNameIncludes.some(s => low.includes(s.toLowerCase()))) return false;
+    return true;
+  }
+
+  const tickTimes = [];
+  async function rateLimit(){
+    if (!CFG.perMinuteCap || !Number.isFinite(CFG.perMinuteCap)) return;
+    const now = Date.now();
+    while (tickTimes.length && now - tickTimes[0] > 60000) tickTimes.shift();
+    if (tickTimes.length >= CFG.perMinuteCap){
+      const wait = 60000 - (now - tickTimes[0]) + 50;
+      await sleep(wait);
+    }
+    tickTimes.push(Date.now());
+  }
+
+  await ensureCards(CFG.startIndex + 20);
+  let totalDone=0, totalSkip=0, totalFail=0;
+  const seenNames = new Set();
+
+  for (let i = CFG.startIndex; totalDone < CFG.limit; i++) {
+    while (!state.running) await sleep(200);
+
+    const cards = getCards();
+    if (i >= cards.length - 5) await ensureCards(cards.length + 15);
+    const card = getCards()[i];
+    if (!card) break;
+
+    const name = cardTitle(card);
+    if (seenNames.has(name)) continue;
+    seenNames.add(name);
+
+    if (!allowedByName(name)) {
+      totalSkip++; state.processed.push({name, status:'skipped', at:Date.now()}); continue;
+    }
+    if (isAlreadyUnsubIn(card)) {
+      totalSkip++; state.processed.push({name, status:'skipped', at:Date.now()}); continue;
+    }
+
+    await rateLimit();
+    if (CFG.dryRun){
+      console.log('[VK Auto] DRY RUN — пропускаю действие для:', name);
+      totalSkip++; state.processed.push({name, status:'skipped', at:Date.now()});
+      continue;
+    }
+
+    const opened = await openMenu(card);
+    if (!opened) {
+      totalFail++; state.processed.push({name, status:'fail', at:Date.now(), reason:'no menu'});
+      warnA('Меню не появилось —', name);
+      continue;
+    }
+
+    const clicked = window.VKSheet.clickLeave();
+    if (!clicked) {
+      totalFail++; state.processed.push({name, status:'fail', at:Date.now(), reason:'no leave item'});
+      warnA('В меню не нашёл «Отписаться» —', name);
+      continue;
+    }
+
+    await window.VKSheet.confirmIfModal();
+    await sleep(CFG.stepDelay);
+
+    let fresh = findCardByName(name) || card;
+    let ok = false;
+    for (let t=0; t<18; t++){
+      if (fresh && isAlreadyUnsubIn(fresh)) { ok = true; break; }
+      await sleep(120);
+      fresh = findCardByName(name) || fresh;
+    }
+
+    if (ok) {
+      totalDone++; state.processed.push({name, status:'done', at:Date.now()});
+      logA(`✓ Отписался [${totalDone}${Number.isFinite(CFG.limit)?'/'+CFG.limit:''}] — ${name}`);
+    } else {
+      totalFail++; state.processed.push({name, status:'fail', at:Date.now(), reason:'no confirm'});
+      warnA('Похоже, не отписался —', name);
+    }
+  }
+
+  logA(`Финиш. Отписался: ${totalDone}, пропущено: ${totalSkip}, ошибок: ${totalFail}.`);
+})();
